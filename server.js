@@ -14,7 +14,6 @@
 
 const express = require('express');
 const cors = require('cors');
-const nodemailer = require('nodemailer');
 const bcrypt = require('bcryptjs');
 const Database = require('better-sqlite3');
 require('dotenv').config();
@@ -49,16 +48,38 @@ db.exec(`
   );
 `);
 
-// --- SMTP transporter --------------------------------------------------
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT || 587),
-  secure: process.env.SMTP_SECURE === 'true', // true for port 465
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+// --- Brevo HTTP email API -------------------------------------------------
+// We use Brevo's HTTPS API instead of SMTP because most hosting platforms
+// (including Railway's Free/Trial/Hobby plans) block outbound SMTP ports
+// (25, 465, 587) to prevent spam abuse. The HTTPS API works everywhere.
+async function sendEmailViaBrevo({ toEmail, toName, subject, html }) {
+  const fromHeader = process.env.FROM_EMAIL || 'Veygo <no-reply@example.com>';
+  const match = fromHeader.match(/^(.*)<(.+)>$/);
+  const senderName = match ? match[1].trim() : 'Veygo';
+  const senderEmail = match ? match[2].trim() : fromHeader.trim();
+
+  const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: {
+      'accept': 'application/json',
+      'api-key': process.env.BREVO_API_KEY,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      sender: { name: senderName, email: senderEmail },
+      to: [{ email: toEmail, name: toName || undefined }],
+      subject,
+      htmlContent: html,
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`Brevo API error (${res.status}): ${errText}`);
+  }
+
+  return res.json();
+}
 
 // --- Helpers -------------------------------------------------------------
 function money(n) {
@@ -118,9 +139,9 @@ app.post('/send-quote', async (req, res) => {
       </div>
     `;
 
-    await transporter.sendMail({
-      from: process.env.FROM_EMAIL,
-      to: customerEmail,
+    await sendEmailViaBrevo({
+      toEmail: customerEmail,
+      toName: customerName,
       subject: 'Your Veygo Insurance Quote',
       html,
     });
