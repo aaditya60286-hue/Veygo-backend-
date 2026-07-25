@@ -87,24 +87,119 @@ function money(n) {
   return '£' + num.toLocaleString('en-GB', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function buildAnnualQuoteHtml(q) {
+function emailRow(label, value, bold) {
   return `
-    <h2 style="color:#3E1B5E;margin:0 0 8px;">Your Annual Quote</h2>
-    <p style="margin:0 0 4px;"><strong>Insurer:</strong> ${q.insurerName}</p>
-    <p style="margin:0 0 4px;">Pay ${q.months} monthly payments of <strong>${money(q.monthly)}</strong></p>
-    <p style="margin:0 0 4px;">Deposit: ${money(q.deposit)}</p>
-    <p style="margin:0 0 4px;">Total: <strong>${money(q.total)}</strong></p>
-    <p style="margin:0;">Or ${money(q.annual)} if paid annually</p>
+    <tr>
+      <td style="padding:10px 0;font-size:14px;color:#6B6478;border-bottom:1px solid #EFEAF6;">${label}</td>
+      <td style="padding:10px 0;font-size:14px;color:#22192B;font-weight:${bold ? '700' : '500'};text-align:right;border-bottom:1px solid #EFEAF6;">${value}</td>
+    </tr>
   `;
 }
 
-function buildTempQuoteHtml(q) {
+function buildAnnualQuoteRows(q) {
   return `
-    <h2 style="color:#3E1B5E;margin:0 0 8px;">Your Temporary Quote</h2>
-    <p style="margin:0 0 4px;"><strong>Insurer:</strong> ${q.insurerName}</p>
-    <p style="margin:0 0 4px;">Cover: ${q.cover}</p>
-    <p style="margin:0 0 4px;">Duration: ${q.duration}</p>
-    <p style="margin:0;">Total Price: <strong>${money(q.price)}</strong></p>
+    ${emailRow('Insurer', q.insurerName, true)}
+    ${emailRow('Monthly payments', q.months + ' payments of ' + money(q.monthly))}
+    ${emailRow('Deposit', money(q.deposit))}
+    ${emailRow('Total (monthly plan)', money(q.total), true)}
+    ${emailRow('Or, paid annually', money(q.annual))}
+  `;
+}
+
+function buildTempQuoteRows(q) {
+  return `
+    ${emailRow('Insurer', q.insurerName, true)}
+    ${emailRow('Cover type', q.cover)}
+    ${emailRow('Duration', q.duration)}
+    ${emailRow('Total price', money(q.price), true)}
+  `;
+}
+
+// Full professional HTML email, styled to look like a real insurer's
+// transactional email (header banner, card layout, CTA note, footer).
+function buildQuoteEmailHtml({ customerName, quoteType, quoteRows }) {
+  const greetingName = customerName ? customerName.split(' ')[0] : 'there';
+  const heading = quoteType === 'annual' ? 'Your Annual Insurance Quote' : 'Your Temporary Insurance Quote';
+
+  return `
+  <!DOCTYPE html>
+  <html>
+  <body style="margin:0;padding:0;background:#F1EEF7;font-family:'Segoe UI',Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F1EEF7;padding:32px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#FFFFFF;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(91,42,134,0.08);">
+
+            <!-- Header banner -->
+            <tr>
+              <td style="background:linear-gradient(135deg,#5B2A86,#3E1B5E);padding:32px 36px;text-align:left;">
+                <span style="font-size:24px;font-weight:800;color:#ffffff;letter-spacing:-0.5px;">
+                  Car <span style="color:#00C2B2;">Insur</span>
+                </span>
+                <div style="font-size:11px;letter-spacing:1.5px;color:rgba(255,255,255,0.75);margin-top:4px;text-transform:uppercase;">
+                  Powered by Veygo
+                </div>
+              </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+              <td style="padding:36px 36px 8px;">
+                <h1 style="margin:0 0 6px;font-size:22px;color:#22192B;">Hi ${greetingName}, here's your quote</h1>
+                <p style="margin:0 0 24px;font-size:15px;color:#6B6478;line-height:1.5;">
+                  Thanks for getting a quote with us. Here's a summary of the cover you selected.
+                </p>
+
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
+                  <tr>
+                    <td style="background:#F9F7FC;border:1px solid #EFEAF6;border-radius:12px;padding:20px 22px;">
+                      <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                        ${quoteRows}
+                      </table>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Reassurance / next steps callout -->
+            <tr>
+              <td style="padding:8px 36px 4px;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="background:#EAFBF7;border:1px solid #C9F0E6;border-radius:12px;padding:18px 20px;">
+                      <p style="margin:0;font-size:14.5px;color:#0B5F52;line-height:1.6;">
+                        <strong>What happens next:</strong> one of our insurance specialists will call you within
+                        <strong>10 minutes</strong> to confirm your details and get your policy set up.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="padding:28px 36px 32px;">
+                <p style="margin:0 0 16px;font-size:13px;color:#9A93A6;line-height:1.6;">
+                  This is a quote summary only and is not a confirmation of cover. Prices are subject to final
+                  underwriting checks.
+                </p>
+                <hr style="border:none;border-top:1px solid #EFEAF6;margin:0 0 16px;">
+                <p style="margin:0;font-size:12px;color:#B3ADBE;line-height:1.6;">
+                  Car Insur is a trading name of Atlanta Insurance Intermediaries Limited. Authorised and Regulated
+                  by the Financial Conduct Authority. Registered address: Embankment West Tower, 101 Cathedral
+                  Approach, Salford, M3 7FB.
+                </p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>
   `;
 }
 
@@ -124,25 +219,16 @@ app.post('/send-quote', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Missing customerEmail, quoteType, or quote' });
     }
 
-    const bodyHtml = quoteType === 'annual'
-      ? buildAnnualQuoteHtml(quote)
-      : buildTempQuoteHtml(quote);
+    const quoteRows = quoteType === 'annual'
+      ? buildAnnualQuoteRows(quote)
+      : buildTempQuoteRows(quote);
 
-    const html = `
-      <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;">
-        <p>Hi ${customerName || 'there'},</p>
-        <p>Thanks for getting a quote with Veygo. Here are the details you selected:</p>
-        ${bodyHtml}
-        <p style="margin-top:24px;color:#6B6478;font-size:13px;">
-          This is a quote summary only and is not a confirmation of cover.
-        </p>
-      </div>
-    `;
+    const html = buildQuoteEmailHtml({ customerName, quoteType, quoteRows });
 
     await sendEmailViaBrevo({
       toEmail: customerEmail,
       toName: customerName,
-      subject: 'Your Veygo Insurance Quote',
+      subject: 'Your Car Insur Quote is Ready',
       html,
     });
 
