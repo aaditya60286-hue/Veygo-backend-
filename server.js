@@ -58,6 +58,18 @@ for (const sql of cancelColumns) {
   try { db.exec(sql); } catch (e) { /* column already exists, ignore */ }
 }
 
+// Brokers you appoint — each has a unique Broker ID that customers must
+// enter correctly on the login page. Managed only from the admin tool.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS brokers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    broker_id TEXT UNIQUE NOT NULL,
+    broker_name TEXT,
+    active INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
 // --- Brevo HTTP email API -------------------------------------------------
 // We use Brevo's HTTPS API instead of SMTP because most hosting platforms
 // (including Railway's Free/Trial/Hobby plans) block outbound SMTP ports
@@ -276,6 +288,58 @@ function publicUser(row){
 //   firstName, lastName, dob, gender, address, postcode,
 //   vehicleReg, vehicleModel, vehicleType, mobile, licenseType
 // }
+// --- Broker management (admin only, used by admin.html) --------------------
+// POST /admin/add-broker  body: { brokerId, brokerName }
+app.post('/admin/add-broker', (req, res) => {
+  try {
+    const { brokerId, brokerName } = req.body;
+    if (!brokerId || !brokerId.trim()) {
+      return res.status(400).json({ ok: false, error: 'Broker ID is required' });
+    }
+
+    const existing = db.prepare('SELECT id FROM brokers WHERE broker_id = ?').get(brokerId.trim());
+    if (existing) {
+      return res.status(409).json({ ok: false, error: 'That Broker ID already exists' });
+    }
+
+    db.prepare('INSERT INTO brokers (broker_id, broker_name) VALUES (?, ?)').run(
+      brokerId.trim(),
+      (brokerName || '').trim() || null
+    );
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Add broker failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not add broker' });
+  }
+});
+
+// GET /admin/brokers — list all appointed brokers
+app.get('/admin/brokers', (req, res) => {
+  try {
+    const brokers = db.prepare('SELECT broker_id, broker_name, active, created_at FROM brokers ORDER BY created_at DESC').all();
+    res.json({ ok: true, brokers });
+  } catch (err) {
+    console.error('List brokers failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not list brokers' });
+  }
+});
+
+// POST /admin/deactivate-broker  body: { brokerId }
+app.post('/admin/deactivate-broker', (req, res) => {
+  try {
+    const { brokerId } = req.body;
+    if (!brokerId) {
+      return res.status(400).json({ ok: false, error: 'Broker ID is required' });
+    }
+    db.prepare('UPDATE brokers SET active = 0 WHERE broker_id = ?').run(brokerId.trim());
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Deactivate broker failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not deactivate broker' });
+  }
+});
+
 app.post('/register', async (req, res) => {
   try {
     const {
@@ -493,9 +557,18 @@ function buildCancellationEmailHtml({ customerName, reason }) {
 
 app.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, brokerId } = req.body;
     if (!email || !password) {
       return res.status(400).json({ ok: false, error: 'Email and password are required' });
+    }
+
+    if (!brokerId || !brokerId.trim()) {
+      return res.status(400).json({ ok: false, error: 'Please enter your Broker ID' });
+    }
+
+    const broker = db.prepare('SELECT * FROM brokers WHERE broker_id = ? AND active = 1').get(brokerId.trim());
+    if (!broker) {
+      return res.status(401).json({ ok: false, error: 'That Broker ID was not recognised. Please check it and try again.' });
     }
 
     const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
