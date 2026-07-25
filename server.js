@@ -48,6 +48,16 @@ db.exec(`
   );
 `);
 
+// Migration: add cancellation columns if this table already existed
+// from before this feature was added. Ignore errors if columns already exist.
+const cancelColumns = [
+  "ALTER TABLE users ADD COLUMN cancelled_at TEXT",
+  "ALTER TABLE users ADD COLUMN cancel_reason TEXT",
+];
+for (const sql of cancelColumns) {
+  try { db.exec(sql); } catch (e) { /* column already exists, ignore */ }
+}
+
 // --- Brevo HTTP email API -------------------------------------------------
 // We use Brevo's HTTPS API instead of SMTP because most hosting platforms
 // (including Railway's Free/Trial/Hobby plans) block outbound SMTP ports
@@ -394,6 +404,93 @@ function buildLoginEmailHtml({ customerName, whenText }) {
   `;
 }
 
+// Professional cancellation-confirmation email, same visual style as the
+// quote/login emails, with a clear closing note and a door left open.
+function buildCancellationEmailHtml({ customerName, reason }) {
+  const greetingName = customerName ? customerName.split(' ')[0] : 'there';
+
+  return `
+  <!DOCTYPE html>
+  <html>
+  <body style="margin:0;padding:0;background:#F1EEF7;font-family:'Segoe UI',Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F1EEF7;padding:32px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#FFFFFF;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(91,42,134,0.08);">
+
+            <!-- Header banner -->
+            <tr>
+              <td style="background:linear-gradient(135deg,#3E1B5E,#22192B);padding:32px 36px;text-align:left;">
+                <span style="font-size:24px;font-weight:800;color:#ffffff;letter-spacing:-0.5px;">
+                  Car <span style="color:#00C2B2;">Insur</span>
+                </span>
+                <div style="font-size:11px;letter-spacing:1.5px;color:rgba(255,255,255,0.75);margin-top:4px;text-transform:uppercase;">
+                  Powered by Veygo
+                </div>
+              </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+              <td style="padding:36px 36px 8px;">
+                <h1 style="margin:0 0 6px;font-size:22px;color:#22192B;">Hi ${greetingName}, your policy has been cancelled</h1>
+                <p style="margin:0 0 20px;font-size:15px;color:#6B6478;line-height:1.6;">
+                  We've processed your cancellation request. Your Car Insur policy and account access are now closed,
+                  and no further payments will be taken.
+                </p>
+
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
+                  <tr>
+                    <td style="background:#F9F7FC;border:1px solid #EFEAF6;border-radius:12px;padding:20px 22px;">
+                      <p style="margin:0;font-size:14px;color:#6B6478;">Reason recorded</p>
+                      <p style="margin:4px 0 0;font-size:15px;color:#22192B;font-weight:700;">${reason || 'Not specified'}</p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Door-left-open callout -->
+            <tr>
+              <td style="padding:8px 36px 4px;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="background:#EAFBF7;border:1px solid #C9F0E6;border-radius:12px;padding:18px 20px;">
+                      <p style="margin:0;font-size:14.5px;color:#0B5F52;line-height:1.6;">
+                        We're sorry to see you go. If you'd like to take out a new policy in future, or if anything
+                        changes, we'd be glad to help — just get in touch and we'll set you up again.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="padding:28px 36px 32px;">
+                <p style="margin:0 0 16px;font-size:13px;color:#9A93A6;line-height:1.6;">
+                  For your security, this account can no longer be logged into. If you didn't request this
+                  cancellation, please contact us immediately.
+                </p>
+                <hr style="border:none;border-top:1px solid #EFEAF6;margin:0 0 16px;">
+                <p style="margin:0;font-size:12px;color:#B3ADBE;line-height:1.6;">
+                  Car Insur is a trading name of Atlanta Insurance Intermediaries Limited. Authorised and Regulated
+                  by the Financial Conduct Authority. Registered address: Embankment West Tower, 101 Cathedral
+                  Approach, Salford, M3 7FB.
+                </p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>
+  `;
+}
+
 app.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -409,6 +506,13 @@ app.post('/login', async (req, res) => {
     const match = await bcrypt.compare(password, row.password_hash);
     if (!match) {
       return res.status(401).json({ ok: false, error: 'Incorrect email or password' });
+    }
+
+    if (row.cancelled_at) {
+      return res.status(403).json({
+        ok: false,
+        error: 'This policy has been cancelled and this account can no longer be accessed. Please contact us if you\'d like to take out a new policy.',
+      });
     }
 
     const user = publicUser(row);
@@ -429,6 +533,62 @@ app.post('/login', async (req, res) => {
   } catch (err) {
     console.error('Login failed:', err);
     res.status(500).json({ ok: false, error: 'Login failed' });
+  }
+});
+
+// --- Route: POST /cancel-policy ---------------------------------------------
+// body: { email, reason, hasAlternativeCover, wouldConsiderFuture, comments }
+// Marks the account as cancelled (soft delete, not a hard delete) so the
+// customer can never log in again, and emails them a confirmation.
+app.post('/cancel-policy', async (req, res) => {
+  try {
+    const { email, reason, hasAlternativeCover, wouldConsiderFuture, comments } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ ok: false, error: 'Missing email' });
+    }
+
+    const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (!row) {
+      return res.status(404).json({ ok: false, error: 'Account not found' });
+    }
+
+    if (row.cancelled_at) {
+      return res.status(409).json({ ok: false, error: 'This policy has already been cancelled' });
+    }
+
+    const fullReasonParts = [reason];
+    if (hasAlternativeCover) fullReasonParts.push('Alternative cover in place: ' + hasAlternativeCover);
+    if (wouldConsiderFuture) fullReasonParts.push('Would consider us again: ' + wouldConsiderFuture);
+    if (comments) fullReasonParts.push('Comments: ' + comments);
+    const fullReason = fullReasonParts.filter(Boolean).join(' | ');
+
+    db.prepare(`
+      UPDATE users SET cancelled_at = @cancelledAt, cancel_reason = @cancelReason WHERE id = @id
+    `).run({
+      cancelledAt: new Date().toISOString(),
+      cancelReason: fullReason,
+      id: row.id,
+    });
+
+    const customerName = [row.first_name, row.last_name].filter(Boolean).join(' ') || null;
+
+    try {
+      await sendEmailViaBrevo({
+        toEmail: row.email,
+        toName: customerName,
+        subject: 'Your Car Insur Policy Has Been Cancelled',
+        html: buildCancellationEmailHtml({ customerName, reason: reason || null }),
+      });
+    } catch (emailErr) {
+      // Cancellation itself still succeeds even if the email fails to send.
+      console.error('Failed to send cancellation email:', emailErr);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Cancel policy failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not process cancellation' });
   }
 });
 
