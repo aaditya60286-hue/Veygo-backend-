@@ -434,6 +434,61 @@ app.post('/login', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
+// --- Route: POST /update-profile --------------------------------------------
+// body: { currentEmail, username?, email?, mobile?, address?, password? }
+// currentEmail identifies the account; any other field left blank keeps its
+// existing value. Password is only changed if a non-empty value is sent.
+app.post('/update-profile', async (req, res) => {
+  try {
+    const { currentEmail, username, email, mobile, address, password } = req.body;
+
+    if (!currentEmail) {
+      return res.status(400).json({ ok: false, error: 'Missing currentEmail' });
+    }
+
+    const row = db.prepare('SELECT * FROM users WHERE email = ?').get(currentEmail);
+    if (!row) {
+      return res.status(404).json({ ok: false, error: 'Account not found' });
+    }
+
+    const newEmail = (email && email.trim()) || row.email;
+    if (newEmail !== row.email) {
+      const clash = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(newEmail, row.id);
+      if (clash) {
+        return res.status(409).json({ ok: false, error: 'That email is already in use by another account' });
+      }
+    }
+
+    let passwordHash = row.password_hash;
+    if (password && password.trim()) {
+      passwordHash = await bcrypt.hash(password, 10);
+    }
+
+    db.prepare(`
+      UPDATE users SET
+        username = @username,
+        email = @email,
+        password_hash = @passwordHash,
+        mobile = @mobile,
+        address = @address
+      WHERE id = @id
+    `).run({
+      username: (username && username.trim()) || row.username,
+      email: newEmail,
+      passwordHash,
+      mobile: (mobile && mobile.trim()) || row.mobile,
+      address: (address && address.trim()) || row.address,
+      id: row.id,
+    });
+
+    const updated = db.prepare('SELECT * FROM users WHERE id = ?').get(row.id);
+    res.json({ ok: true, user: publicUser(updated) });
+  } catch (err) {
+    console.error('Update profile failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not save changes' });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Veygo quote-email backend running on port ${PORT}`);
 });
