@@ -320,6 +320,80 @@ app.post('/register', async (req, res) => {
 
 // --- Route: POST /login -----------------------------------------------------
 // body: { email, password }
+// Professional "you just logged in" notification email, same visual style
+// as the quote email, with a security reassurance note.
+function buildLoginEmailHtml({ customerName, whenText }) {
+  const greetingName = customerName ? customerName.split(' ')[0] : 'there';
+
+  return `
+  <!DOCTYPE html>
+  <html>
+  <body style="margin:0;padding:0;background:#F1EEF7;font-family:'Segoe UI',Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F1EEF7;padding:32px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#FFFFFF;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(91,42,134,0.08);">
+
+            <!-- Header banner -->
+            <tr>
+              <td style="background:linear-gradient(135deg,#5B2A86,#3E1B5E);padding:32px 36px;text-align:left;">
+                <span style="font-size:24px;font-weight:800;color:#ffffff;letter-spacing:-0.5px;">
+                  Car <span style="color:#00C2B2;">Insur</span>
+                </span>
+                <div style="font-size:11px;letter-spacing:1.5px;color:rgba(255,255,255,0.75);margin-top:4px;text-transform:uppercase;">
+                  Powered by Veygo
+                </div>
+              </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+              <td style="padding:36px 36px 8px;">
+                <h1 style="margin:0 0 6px;font-size:22px;color:#22192B;">Hi ${greetingName}, you just logged in</h1>
+                <p style="margin:0 0 20px;font-size:15px;color:#6B6478;line-height:1.6;">
+                  We're confirming a successful sign-in to your Car Insur account${whenText ? ' on ' + whenText : ''}.
+                  You can view your policy, documents, and vehicle details anytime from your dashboard.
+                </p>
+              </td>
+            </tr>
+
+            <!-- Security callout -->
+            <tr>
+              <td style="padding:8px 36px 4px;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="background:#F9F7FC;border:1px solid #EFEAF6;border-radius:12px;padding:18px 20px;">
+                      <p style="margin:0;font-size:14.5px;color:#22192B;line-height:1.6;">
+                        <strong>Wasn't you?</strong> If you don't recognise this sign-in, please contact us straight
+                        away so we can help secure your account.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="padding:28px 36px 32px;">
+                <hr style="border:none;border-top:1px solid #EFEAF6;margin:0 0 16px;">
+                <p style="margin:0;font-size:12px;color:#B3ADBE;line-height:1.6;">
+                  Car Insur is a trading name of Atlanta Insurance Intermediaries Limited. Authorised and Regulated
+                  by the Financial Conduct Authority. Registered address: Embankment West Tower, 101 Cathedral
+                  Approach, Salford, M3 7FB.
+                </p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>
+  `;
+}
+
 app.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -337,7 +411,21 @@ app.post('/login', async (req, res) => {
       return res.status(401).json({ ok: false, error: 'Incorrect email or password' });
     }
 
-    res.json({ ok: true, user: publicUser(row) });
+    const user = publicUser(row);
+    res.json({ ok: true, user });
+
+    // Fire-and-forget: never let an email issue delay or break the login response.
+    const whenText = new Date().toLocaleString('en-GB', {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      timeZone: 'Europe/London',
+    });
+    sendEmailViaBrevo({
+      toEmail: user.email,
+      toName: user.name,
+      subject: 'You just logged into Car Insur',
+      html: buildLoginEmailHtml({ customerName: user.name, whenText }),
+    }).catch(err => console.error('Failed to send login notification email:', err));
   } catch (err) {
     console.error('Login failed:', err);
     res.status(500).json({ ok: false, error: 'Login failed' });
