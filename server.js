@@ -58,17 +58,20 @@ for (const sql of cancelColumns) {
   try { db.exec(sql); } catch (e) { /* column already exists, ignore */ }
 }
 
-// Brokers you appoint — each has a unique Broker ID that customers must
-// enter correctly on the login page. Managed only from the admin tool.
+// Brokers you appoint — each has a unique Broker ID and their own password,
+// letting them log in independently (not tied to any customer account).
+// Managed only from the admin tool.
 db.exec(`
   CREATE TABLE IF NOT EXISTS brokers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     broker_id TEXT UNIQUE NOT NULL,
     broker_name TEXT,
+    password_hash TEXT,
     active INTEGER DEFAULT 1,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 `);
+try { db.exec("ALTER TABLE brokers ADD COLUMN password_hash TEXT"); } catch (e) { /* already exists */ }
 
 // --- Brevo HTTP email API -------------------------------------------------
 // We use Brevo's HTTPS API instead of SMTP because most hosting platforms
@@ -290,11 +293,14 @@ function publicUser(row){
 // }
 // --- Broker management (admin only, used by admin.html) --------------------
 // POST /admin/add-broker  body: { brokerId, brokerName }
-app.post('/admin/add-broker', (req, res) => {
+app.post('/admin/add-broker', async (req, res) => {
   try {
-    const { brokerId, brokerName } = req.body;
+    const { brokerId, brokerName, password } = req.body;
     if (!brokerId || !brokerId.trim()) {
       return res.status(400).json({ ok: false, error: 'Broker ID is required' });
+    }
+    if (!password || !password.trim()) {
+      return res.status(400).json({ ok: false, error: 'A password for this broker is required' });
     }
 
     const existing = db.prepare('SELECT id FROM brokers WHERE broker_id = ?').get(brokerId.trim());
@@ -302,15 +308,48 @@ app.post('/admin/add-broker', (req, res) => {
       return res.status(409).json({ ok: false, error: 'That Broker ID already exists' });
     }
 
-    db.prepare('INSERT INTO brokers (broker_id, broker_name) VALUES (?, ?)').run(
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    db.prepare('INSERT INTO brokers (broker_id, broker_name, password_hash) VALUES (?, ?, ?)').run(
       brokerId.trim(),
-      (brokerName || '').trim() || null
+      (brokerName || '').trim() || null,
+      passwordHash
     );
 
     res.json({ ok: true });
   } catch (err) {
     console.error('Add broker failed:', err);
     res.status(500).json({ ok: false, error: 'Could not add broker' });
+  }
+});
+
+// --- Route: POST /broker-login -----------------------------------------------
+// body: { brokerId, password }
+// Independent broker login — not tied to any customer account.
+app.post('/broker-login', async (req, res) => {
+  try {
+    const { brokerId, password } = req.body;
+    if (!brokerId || !password) {
+      return res.status(400).json({ ok: false, error: 'Broker ID and password are required' });
+    }
+
+    const broker = db.prepare('SELECT * FROM brokers WHERE broker_id = ? AND active = 1').get(brokerId.trim());
+    if (!broker || !broker.password_hash) {
+      return res.status(401).json({ ok: false, error: 'Incorrect Broker ID or password' });
+    }
+
+    const match = await bcrypt.compare(password, broker.password_hash);
+    if (!match) {
+      return res.status(401).json({ ok: false, error: 'Incorrect Broker ID or password' });
+    }
+
+    res.json({
+      ok: true,
+      broker: { brokerId: broker.broker_id, brokerName: broker.broker_name },
+    });
+  } catch (err) {
+    console.error('Broker login failed:', err);
+    res.status(500).json({ ok: false, error: 'Login failed' });
   }
 });
 
@@ -557,20 +596,9 @@ function buildCancellationEmailHtml({ customerName, reason }) {
 
 app.post('/login', async (req, res) => {
   try {
-    const { email, password, brokerId } = req.body;
+    const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ ok: false, error: 'Email and password are required' });
-    }
-
-    // Broker ID is optional: only brokers need to fill it in. If someone
-    // enters one, it must be valid and active. If left blank, this is a
-    // normal customer login and no broker check is needed.
-    let broker = null;
-    if (brokerId && brokerId.trim()) {
-      broker = db.prepare('SELECT * FROM brokers WHERE broker_id = ? AND active = 1').get(brokerId.trim());
-      if (!broker) {
-        return res.status(401).json({ ok: false, error: 'That Broker ID was not recognised. Please check it and try again.' });
-      }
     }
 
     const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
