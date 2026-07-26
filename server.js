@@ -16,11 +16,13 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const Database = require('better-sqlite3');
+const fs = require('fs');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '15mb' })); // certificates are small files sent as base64
 
 const PORT = process.env.PORT || 3000;
 
@@ -92,6 +94,24 @@ db.exec(`
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 `);
+
+// Insurance certificates (and other documents) uploaded by the admin for a
+// specific customer, so they can view/download them from their dashboard.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS certificates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_email TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+// Files are stored on disk next to the SQLite database, so they live on the
+// same persistent Railway volume (mounted at DB_PATH's directory) and
+// survive redeploys, same as the database itself.
+const CERT_DIR = path.join(path.dirname(process.env.DB_PATH || 'veygo.db'), 'certificates');
+try { fs.mkdirSync(CERT_DIR, { recursive: true }); } catch (e) { /* already exists */ }
 
 // --- Brevo HTTP email API -------------------------------------------------
 // We use Brevo's HTTPS API instead of SMTP because most hosting platforms
@@ -862,6 +882,72 @@ app.post('/cancel-policy', async (req, res) => {
   } catch (err) {
     console.error('Cancel policy failed:', err);
     res.status(500).json({ ok: false, error: 'Could not process cancellation' });
+  }
+});
+
+// --- Route: POST /admin/upload-certificate -----------------------------------
+// body: { email, filename, fileBase64 }
+// fileBase64 should NOT include the "data:application/pdf;base64," prefix —
+// just the raw base64 content. Saves the file to persistent disk and
+// records it against the customer's email.
+app.post('/admin/upload-certificate', (req, res) => {
+  try {
+    const { email, filename, fileBase64 } = req.body;
+
+    if (!email || !filename || !fileBase64) {
+      return res.status(400).json({ ok: false, error: 'Missing email, filename, or file data' });
+    }
+
+    const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email.trim());
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'No customer account found with that email' });
+    }
+
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storedName = Date.now() + '-' + safeName;
+    const filePath = path.join(CERT_DIR, storedName);
+
+    fs.writeFileSync(filePath, Buffer.from(fileBase64, 'base64'));
+
+    db.prepare(`
+      INSERT INTO certificates (user_email, filename, file_path) VALUES (?, ?, ?)
+    `).run(email.trim(), filename, filePath);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Certificate upload failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not upload certificate' });
+  }
+});
+
+// GET /certificates?email=... — list a customer's documents
+app.get('/certificates', (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ ok: false, error: 'Missing email' });
+    }
+    const rows = db.prepare(`
+      SELECT id, filename, uploaded_at FROM certificates WHERE user_email = ? ORDER BY uploaded_at DESC
+    `).all(email);
+    res.json({ ok: true, certificates: rows });
+  } catch (err) {
+    console.error('List certificates failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not list certificates' });
+  }
+});
+
+// GET /certificates/:id/download — stream the file back
+app.get('/certificates/:id/download', (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM certificates WHERE id = ?').get(req.params.id);
+    if (!row || !fs.existsSync(row.file_path)) {
+      return res.status(404).send('File not found');
+    }
+    res.download(row.file_path, row.filename);
+  } catch (err) {
+    console.error('Certificate download failed:', err);
+    res.status(500).send('Could not download file');
   }
 });
 
