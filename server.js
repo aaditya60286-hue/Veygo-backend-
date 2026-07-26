@@ -562,13 +562,15 @@ app.post('/login', async (req, res) => {
       return res.status(400).json({ ok: false, error: 'Email and password are required' });
     }
 
-    if (!brokerId || !brokerId.trim()) {
-      return res.status(400).json({ ok: false, error: 'Please enter your Broker ID' });
-    }
-
-    const broker = db.prepare('SELECT * FROM brokers WHERE broker_id = ? AND active = 1').get(brokerId.trim());
-    if (!broker) {
-      return res.status(401).json({ ok: false, error: 'That Broker ID was not recognised. Please check it and try again.' });
+    // Broker ID is optional: only brokers need to fill it in. If someone
+    // enters one, it must be valid and active. If left blank, this is a
+    // normal customer login and no broker check is needed.
+    let broker = null;
+    if (brokerId && brokerId.trim()) {
+      broker = db.prepare('SELECT * FROM brokers WHERE broker_id = ? AND active = 1').get(brokerId.trim());
+      if (!broker) {
+        return res.status(401).json({ ok: false, error: 'That Broker ID was not recognised. Please check it and try again.' });
+      }
     }
 
     const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
