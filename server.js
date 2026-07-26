@@ -146,6 +146,52 @@ async function sendEmailViaBrevo({ toEmail, toName, subject, html }) {
   return res.json();
 }
 
+// --- Admin notifications --------------------------------------------------
+// Sends YOU (not the customer) a quick internal email whenever a customer
+// or broker does something important, so you always have their phone
+// number and details on hand for follow-up. Fire-and-forget: never let a
+// notification failure affect the customer-facing action that triggered it.
+async function notifyAdmin({ event, name, email, phone, details }) {
+  const adminEmail = process.env.ADMIN_NOTIFICATION_EMAIL;
+  if (!adminEmail) return; // not configured — silently skip
+
+  const rows = [
+    ['Event', event],
+    ['Name', name || '—'],
+    ['Email', email || '—'],
+    ['Phone', phone || '—'],
+  ];
+  if (details) rows.push(['Details', details]);
+
+  const bodyRows = rows.map(([label, value]) => `
+    <tr>
+      <td style="padding:8px 12px;font-size:13px;color:#6B6478;border-bottom:1px solid #EFEAF6;">${label}</td>
+      <td style="padding:8px 12px;font-size:13px;color:#22192B;font-weight:600;border-bottom:1px solid #EFEAF6;">${value}</td>
+    </tr>
+  `).join('');
+
+  const html = `
+    <div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:20px;">
+      <h2 style="color:#3E1B5E;margin:0 0 14px;font-size:18px;">Car Insur — Activity Notification</h2>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #EFEAF6;border-radius:10px;overflow:hidden;">
+        ${bodyRows}
+      </table>
+      <p style="color:#9A93A6;font-size:12px;margin-top:16px;">Sent automatically by your Car Insur backend.</p>
+    </div>
+  `;
+
+  try {
+    await sendEmailViaBrevo({
+      toEmail: adminEmail,
+      toName: 'Admin',
+      subject: `[Car Insur] ${event}${name ? ' — ' + name : ''}`,
+      html,
+    });
+  } catch (err) {
+    console.error('Admin notification failed:', err);
+  }
+}
+
 // --- Helpers -------------------------------------------------------------
 function money(n) {
   const num = Number(n) || 0;
@@ -278,7 +324,7 @@ function buildQuoteEmailHtml({ customerName, quoteType, quoteRows }) {
 // }
 app.post('/send-quote', async (req, res) => {
   try {
-    const { customerEmail, customerName, quoteType, quote } = req.body;
+    const { customerEmail, customerName, customerPhone, quoteType, quote } = req.body;
 
     if (!customerEmail || !quoteType || !quote) {
       return res.status(400).json({ ok: false, error: 'Missing customerEmail, quoteType, or quote' });
@@ -295,6 +341,14 @@ app.post('/send-quote', async (req, res) => {
       toName: customerName,
       subject: 'Your Car Insur Quote is Ready',
       html,
+    });
+
+    notifyAdmin({
+      event: 'Customer requested a quote',
+      name: customerName,
+      email: customerEmail,
+      phone: customerPhone,
+      details: `${quoteType === 'annual' ? 'Annual' : 'Temporary'} quote — ${quote.insurerName || ''}`,
     });
 
     res.json({ ok: true });
@@ -483,6 +537,14 @@ app.post('/broker-application-pay', async (req, res) => {
       console.error('Failed to send broker application email:', emailErr);
     }
 
+    notifyAdmin({
+      event: 'New broker application — deposit paid',
+      name: application.full_name,
+      email: application.email,
+      phone: application.mobile,
+      details: `Address: ${application.address || '—'}, ${application.postcode || ''}`,
+    });
+
     res.json({ ok: true });
   } catch (err) {
     console.error('Broker deposit payment failed:', err);
@@ -535,7 +597,17 @@ app.post('/register', async (req, res) => {
     });
 
     const row = db.prepare('SELECT * FROM users WHERE id = ?').get(info.lastInsertRowid);
-    res.json({ ok: true, user: publicUser(row) });
+    const newUser = publicUser(row);
+
+    notifyAdmin({
+      event: 'New customer registered',
+      name: newUser.name,
+      email: newUser.email,
+      phone: newUser.mobile,
+      details: `Vehicle: ${newUser.vehicleType || ''} ${newUser.vehicleReg || ''}`.trim(),
+    });
+
+    res.json({ ok: true, user: newUser });
   } catch (err) {
     console.error('Registration failed:', err);
     res.status(500).json({ ok: false, error: 'Registration failed' });
@@ -823,6 +895,13 @@ app.post('/login', async (req, res) => {
       subject: 'You just logged into Car Insur',
       html: buildLoginEmailHtml({ customerName: user.name, whenText }),
     }).catch(err => console.error('Failed to send login notification email:', err));
+
+    notifyAdmin({
+      event: 'Customer logged in',
+      name: user.name,
+      email: user.email,
+      phone: user.mobile,
+    });
   } catch (err) {
     console.error('Login failed:', err);
     res.status(500).json({ ok: false, error: 'Login failed' });
@@ -877,6 +956,14 @@ app.post('/cancel-policy', async (req, res) => {
       // Cancellation itself still succeeds even if the email fails to send.
       console.error('Failed to send cancellation email:', emailErr);
     }
+
+    notifyAdmin({
+      event: 'Customer cancelled their policy',
+      name: customerName,
+      email: row.email,
+      phone: row.mobile,
+      details: fullReason,
+    });
 
     res.json({ ok: true });
   } catch (err) {
