@@ -73,6 +73,26 @@ db.exec(`
 `);
 try { db.exec("ALTER TABLE brokers ADD COLUMN password_hash TEXT"); } catch (e) { /* already exists */ }
 
+// Applications from the public "Become a Broker" recruitment flow. Kept
+// separate from the appointed `brokers` table — an application only becomes
+// a real broker account once you (the admin) review it and add them via
+// the admin tool.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS broker_applications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    full_name TEXT,
+    email TEXT,
+    mobile TEXT,
+    dob TEXT,
+    address TEXT,
+    postcode TEXT,
+    experience TEXT,
+    deposit_paid INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'pending_payment',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
 // --- Brevo HTTP email API -------------------------------------------------
 // We use Brevo's HTTPS API instead of SMTP because most hosting platforms
 // (including Railway's Free/Trial/Hobby plans) block outbound SMTP ports
@@ -379,6 +399,77 @@ app.post('/admin/deactivate-broker', (req, res) => {
   }
 });
 
+// --- Route: POST /apply-broker ----------------------------------------------
+// body: { fullName, email, mobile, dob, address, postcode, experience }
+// Stores a broker application (separate from the real appointed brokers
+// table). Returns an applicationId used by the deposit-payment step.
+app.post('/apply-broker', (req, res) => {
+  try {
+    const { fullName, email, mobile, dob, address, postcode, experience } = req.body;
+
+    if (!fullName || !fullName.trim() || !email || !email.trim()) {
+      return res.status(400).json({ ok: false, error: 'Full name and email are required' });
+    }
+
+    const info = db.prepare(`
+      INSERT INTO broker_applications (full_name, email, mobile, dob, address, postcode, experience)
+      VALUES (@fullName, @email, @mobile, @dob, @address, @postcode, @experience)
+    `).run({
+      fullName: fullName.trim(),
+      email: email.trim(),
+      mobile: (mobile || '').trim() || null,
+      dob: dob || null,
+      address: (address || '').trim() || null,
+      postcode: (postcode || '').trim() || null,
+      experience: (experience || '').trim() || null,
+    });
+
+    res.json({ ok: true, applicationId: info.lastInsertRowid });
+  } catch (err) {
+    console.error('Broker application failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not submit application' });
+  }
+});
+
+// --- Route: POST /broker-application-pay ------------------------------------
+// body: { applicationId }
+// Marks the £999 deposit as paid (simulated — no real payment gateway is
+// connected) and sends the professional confirmation email.
+app.post('/broker-application-pay', async (req, res) => {
+  try {
+    const { applicationId } = req.body;
+    if (!applicationId) {
+      return res.status(400).json({ ok: false, error: 'Missing applicationId' });
+    }
+
+    const application = db.prepare('SELECT * FROM broker_applications WHERE id = ?').get(applicationId);
+    if (!application) {
+      return res.status(404).json({ ok: false, error: 'Application not found' });
+    }
+
+    db.prepare(`
+      UPDATE broker_applications SET deposit_paid = 1, status = 'pending_review' WHERE id = ?
+    `).run(applicationId);
+
+    try {
+      await sendEmailViaBrevo({
+        toEmail: application.email,
+        toName: application.full_name,
+        subject: 'Your Car Insur Broker Application — Deposit Received',
+        html: buildBrokerApplicationEmailHtml({ fullName: application.full_name }),
+      });
+    } catch (emailErr) {
+      // The application/payment itself still succeeds even if the email fails.
+      console.error('Failed to send broker application email:', emailErr);
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Broker deposit payment failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not process deposit payment' });
+  }
+});
+
 app.post('/register', async (req, res) => {
   try {
     const {
@@ -575,6 +666,85 @@ function buildCancellationEmailHtml({ customerName, reason }) {
                 <p style="margin:0 0 16px;font-size:13px;color:#9A93A6;line-height:1.6;">
                   For your security, this account can no longer be logged into. If you didn't request this
                   cancellation, please contact us immediately.
+                </p>
+                <hr style="border:none;border-top:1px solid #EFEAF6;margin:0 0 16px;">
+                <p style="margin:0;font-size:12px;color:#B3ADBE;line-height:1.6;">
+                  Car Insur is a trading name of Atlanta Insurance Intermediaries Limited. Authorised and Regulated
+                  by the Financial Conduct Authority. Registered address: Embankment West Tower, 101 Cathedral
+                  Approach, Salford, M3 7FB.
+                </p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>
+  `;
+}
+
+// Professional "broker application received" confirmation email, sent once
+// the applicant's deposit step completes.
+function buildBrokerApplicationEmailHtml({ fullName }) {
+  const greetingName = fullName ? fullName.split(' ')[0] : 'there';
+
+  return `
+  <!DOCTYPE html>
+  <html>
+  <body style="margin:0;padding:0;background:#F1EEF7;font-family:'Segoe UI',Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F1EEF7;padding:32px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#FFFFFF;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(91,42,134,0.08);">
+
+            <!-- Header banner -->
+            <tr>
+              <td style="background:linear-gradient(135deg,#5B2A86,#3E1B5E);padding:32px 36px;text-align:left;">
+                <span style="font-size:24px;font-weight:800;color:#ffffff;letter-spacing:-0.5px;">
+                  Car <span style="color:#00C2B2;">Insur</span>
+                </span>
+                <div style="font-size:11px;letter-spacing:1.5px;color:rgba(255,255,255,0.75);margin-top:4px;text-transform:uppercase;">
+                  Broker Programme
+                </div>
+              </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+              <td style="padding:36px 36px 8px;">
+                <h1 style="margin:0 0 6px;font-size:22px;color:#22192B;">Thanks for applying, ${greetingName}!</h1>
+                <p style="margin:0 0 20px;font-size:15px;color:#6B6478;line-height:1.6;">
+                  We've received your broker application and your <strong>£999 refundable deposit</strong>.
+                  This deposit is fully refundable after 12 months, as long as your broker account remains in
+                  good standing.
+                </p>
+              </td>
+            </tr>
+
+            <!-- Next steps callout -->
+            <tr>
+              <td style="padding:8px 36px 4px;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="background:#EAFBF7;border:1px solid #C9F0E6;border-radius:12px;padding:18px 20px;">
+                      <p style="margin:0;font-size:14.5px;color:#0B5F52;line-height:1.6;">
+                        <strong>What happens next:</strong> one of our team members will call you within
+                        <strong>10 minutes</strong> to verify your details and complete your onboarding as an
+                        appointed Car Insur broker.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="padding:28px 36px 32px;">
+                <p style="margin:0 0 16px;font-size:13px;color:#9A93A6;line-height:1.6;">
+                  If you didn't submit this application, please contact us straight away.
                 </p>
                 <hr style="border:none;border-top:1px solid #EFEAF6;margin:0 0 16px;">
                 <p style="margin:0;font-size:12px;color:#B3ADBE;line-height:1.6;">
