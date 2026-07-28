@@ -55,6 +55,7 @@ db.exec(`
 const cancelColumns = [
   "ALTER TABLE users ADD COLUMN cancelled_at TEXT",
   "ALTER TABLE users ADD COLUMN cancel_reason TEXT",
+  "ALTER TABLE users ADD COLUMN policy_number TEXT",
 ];
 for (const sql of cancelColumns) {
   try { db.exec(sql); } catch (e) { /* column already exists, ignore */ }
@@ -376,6 +377,7 @@ function publicUser(row){
     vehicleReg: row.vehicle_reg || null,
     vehicleModel: row.vehicle_model || null,
     vehicleType: row.vehicle_type || null,
+    policyNumber: row.policy_number || null,
   };
 }
 
@@ -977,6 +979,28 @@ app.post('/cancel-policy', async (req, res) => {
 // fileBase64 should NOT include the "data:application/pdf;base64," prefix —
 // just the raw base64 content. Saves the file to persistent disk and
 // records it against the customer's email.
+// --- Route: POST /admin/set-policy-number -----------------------------------
+// body: { email, policyNumber }
+app.post('/admin/set-policy-number', (req, res) => {
+  try {
+    const { email, policyNumber } = req.body;
+    if (!email || !policyNumber || !policyNumber.trim()) {
+      return res.status(400).json({ ok: false, error: 'Email and policy number are required' });
+    }
+
+    const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email.trim());
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'No customer account found with that email' });
+    }
+
+    db.prepare('UPDATE users SET policy_number = ? WHERE email = ?').run(policyNumber.trim(), email.trim());
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Set policy number failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not save policy number' });
+  }
+});
+
 app.post('/admin/upload-certificate', (req, res) => {
   try {
     const { email, filename, fileBase64 } = req.body;
