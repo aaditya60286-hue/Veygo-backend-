@@ -1068,9 +1068,32 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 // body: { currentEmail, username?, email?, mobile?, address?, password? }
 // currentEmail identifies the account; any other field left blank keeps its
 // existing value. Password is only changed if a non-empty value is sent.
+// GET /admin/customer?email=... — fetch a customer's full details so the
+// admin tool can pre-fill the edit form.
+app.get('/admin/customer', (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ ok: false, error: 'Missing email' });
+    }
+    const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+    if (!row) {
+      return res.status(404).json({ ok: false, error: 'No customer account found with that email' });
+    }
+    res.json({ ok: true, user: publicUser(row) });
+  } catch (err) {
+    console.error('Customer lookup failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not look up customer' });
+  }
+});
+
 app.post('/update-profile', async (req, res) => {
   try {
-    const { currentEmail, username, email, mobile, address, password } = req.body;
+    const {
+      currentEmail, username, email, mobile, address, password,
+      firstName, lastName, dob, gender, postcode,
+      vehicleReg, vehicleModel, vehicleType, licenseType,
+    } = req.body;
 
     if (!currentEmail) {
       return res.status(400).json({ ok: false, error: 'Missing currentEmail' });
@@ -1100,7 +1123,16 @@ app.post('/update-profile', async (req, res) => {
         email = @email,
         password_hash = @passwordHash,
         mobile = @mobile,
-        address = @address
+        address = @address,
+        first_name = @firstName,
+        last_name = @lastName,
+        dob = @dob,
+        gender = @gender,
+        postcode = @postcode,
+        vehicle_reg = @vehicleReg,
+        vehicle_model = @vehicleModel,
+        vehicle_type = @vehicleType,
+        license_type = @licenseType
       WHERE id = @id
     `).run({
       username: (username && username.trim()) || row.username,
@@ -1108,6 +1140,15 @@ app.post('/update-profile', async (req, res) => {
       passwordHash,
       mobile: (mobile && mobile.trim()) || row.mobile,
       address: (address && address.trim()) || row.address,
+      firstName: (firstName && firstName.trim()) || row.first_name,
+      lastName: (lastName && lastName.trim()) || row.last_name,
+      dob: dob || row.dob,
+      gender: (gender && gender.trim()) || row.gender,
+      postcode: (postcode && postcode.trim()) || row.postcode,
+      vehicleReg: (vehicleReg && vehicleReg.trim()) || row.vehicle_reg,
+      vehicleModel: (vehicleModel && vehicleModel.trim()) || row.vehicle_model,
+      vehicleType: (vehicleType && vehicleType.trim()) || row.vehicle_type,
+      licenseType: (licenseType && licenseType.trim()) || row.license_type,
       id: row.id,
     });
 
