@@ -114,6 +114,20 @@ db.exec(`
 const CERT_DIR = path.join(path.dirname(process.env.DB_PATH || 'veygo.db'), 'certificates');
 try { fs.mkdirSync(CERT_DIR, { recursive: true }); } catch (e) { /* already exists */ }
 
+// Additional vehicles for a customer, beyond the single primary vehicle
+// already stored directly on the users table. Lets one customer account
+// hold more than one insured vehicle.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS vehicles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_email TEXT NOT NULL,
+    vehicle_reg TEXT,
+    vehicle_model TEXT,
+    vehicle_type TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
 // --- Brevo HTTP email API -------------------------------------------------
 // We use Brevo's HTTPS API instead of SMTP because most hosting platforms
 // (including Railway's Free/Trial/Hobby plans) block outbound SMTP ports
@@ -1070,6 +1084,71 @@ app.get('/health', (req, res) => res.json({ ok: true }));
 // existing value. Password is only changed if a non-empty value is sent.
 // GET /admin/customer?email=... — fetch a customer's full details so the
 // admin tool can pre-fill the edit form.
+// --- Route: POST /admin/add-vehicle -----------------------------------------
+// body: { email, vehicleReg, vehicleModel, vehicleType }
+app.post('/admin/add-vehicle', (req, res) => {
+  try {
+    const { email, vehicleReg, vehicleModel, vehicleType } = req.body;
+
+    if (!email || !vehicleReg || !vehicleReg.trim()) {
+      return res.status(400).json({ ok: false, error: 'Customer email and vehicle reg are required' });
+    }
+
+    const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email.trim());
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'No customer account found with that email' });
+    }
+
+    db.prepare(`
+      INSERT INTO vehicles (user_email, vehicle_reg, vehicle_model, vehicle_type)
+      VALUES (?, ?, ?, ?)
+    `).run(
+      email.trim(),
+      vehicleReg.trim(),
+      (vehicleModel || '').trim() || null,
+      (vehicleType || '').trim() || 'Car'
+    );
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Add vehicle failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not add vehicle' });
+  }
+});
+
+// GET /vehicles?email=... — list all extra vehicles for a customer
+app.get('/vehicles', (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ ok: false, error: 'Missing email' });
+    }
+    const rows = db.prepare(`
+      SELECT id, vehicle_reg, vehicle_model, vehicle_type, created_at
+      FROM vehicles WHERE user_email = ? ORDER BY created_at DESC
+    `).all(email);
+    res.json({ ok: true, vehicles: rows });
+  } catch (err) {
+    console.error('List vehicles failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not list vehicles' });
+  }
+});
+
+// POST /admin/delete-vehicle  body: { id }
+app.post('/admin/delete-vehicle', (req, res) => {
+  try {
+    const { id } = req.body;
+    if (!id) {
+      return res.status(400).json({ ok: false, error: 'Missing vehicle id' });
+    }
+    db.prepare('DELETE FROM vehicles WHERE id = ?').run(id);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Delete vehicle failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not delete vehicle' });
+  }
+});
+
 app.get('/admin/customer', (req, res) => {
   try {
     const { email } = req.query;
