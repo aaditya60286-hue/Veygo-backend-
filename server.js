@@ -98,15 +98,19 @@ db.exec(`
 
 // Insurance certificates (and other documents) uploaded by the admin for a
 // specific customer, so they can view/download them from their dashboard.
+// vehicle_reg is optional — leave blank for general account documents, or
+// set it to link a document to one specific vehicle on the account.
 db.exec(`
   CREATE TABLE IF NOT EXISTS certificates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_email TEXT NOT NULL,
     filename TEXT NOT NULL,
     file_path TEXT NOT NULL,
+    vehicle_reg TEXT,
     uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
   );
 `);
+try { db.exec("ALTER TABLE certificates ADD COLUMN vehicle_reg TEXT"); } catch (e) { /* already exists */ }
 
 // Files are stored on disk next to the SQLite database, so they live on the
 // same persistent Railway volume (mounted at DB_PATH's directory) and
@@ -1017,7 +1021,7 @@ app.post('/admin/set-policy-number', (req, res) => {
 
 app.post('/admin/upload-certificate', (req, res) => {
   try {
-    const { email, filename, fileBase64 } = req.body;
+    const { email, filename, fileBase64, vehicleReg } = req.body;
 
     if (!email || !filename || !fileBase64) {
       return res.status(400).json({ ok: false, error: 'Missing email, filename, or file data' });
@@ -1035,8 +1039,8 @@ app.post('/admin/upload-certificate', (req, res) => {
     fs.writeFileSync(filePath, Buffer.from(fileBase64, 'base64'));
 
     db.prepare(`
-      INSERT INTO certificates (user_email, filename, file_path) VALUES (?, ?, ?)
-    `).run(email.trim(), filename, filePath);
+      INSERT INTO certificates (user_email, filename, file_path, vehicle_reg) VALUES (?, ?, ?, ?)
+    `).run(email.trim(), filename, filePath, (vehicleReg || '').trim() || null);
 
     res.json({ ok: true });
   } catch (err) {
@@ -1053,7 +1057,7 @@ app.get('/certificates', (req, res) => {
       return res.status(400).json({ ok: false, error: 'Missing email' });
     }
     const rows = db.prepare(`
-      SELECT id, filename, uploaded_at FROM certificates WHERE user_email = ? ORDER BY uploaded_at DESC
+      SELECT id, filename, vehicle_reg, uploaded_at FROM certificates WHERE user_email = ? ORDER BY uploaded_at DESC
     `).all(email);
     res.json({ ok: true, certificates: rows });
   } catch (err) {
@@ -1073,6 +1077,71 @@ app.get('/certificates/:id/download', (req, res) => {
   } catch (err) {
     console.error('Certificate download failed:', err);
     res.status(500).send('Could not download file');
+  }
+});
+
+// POST /admin/delete-certificate  body: { id }
+// Deletes both the database record and the file on disk.
+app.post('/admin/delete-certificate', (req, res) => {
+  try {
+    const { id } = req.body;
+    if (!id) {
+      return res.status(400).json({ ok: false, error: 'Missing certificate id' });
+    }
+
+    const row = db.prepare('SELECT * FROM certificates WHERE id = ?').get(id);
+    if (!row) {
+      return res.status(404).json({ ok: false, error: 'Certificate not found' });
+    }
+
+    try { fs.unlinkSync(row.file_path); } catch (e) { /* file may already be gone, ignore */ }
+    db.prepare('DELETE FROM certificates WHERE id = ?').run(id);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Delete certificate failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not delete certificate' });
+  }
+});
+
+// POST /admin/replace-certificate  body: { id, filename, fileBase64, vehicleReg }
+// Replaces the file (and optionally its vehicle link) for an existing
+// certificate record, keeping the same database row/id and same customer.
+app.post('/admin/replace-certificate', (req, res) => {
+  try {
+    const { id, filename, fileBase64, vehicleReg } = req.body;
+
+    if (!id || !filename || !fileBase64) {
+      return res.status(400).json({ ok: false, error: 'Missing id, filename, or file data' });
+    }
+
+    const row = db.prepare('SELECT * FROM certificates WHERE id = ?').get(id);
+    if (!row) {
+      return res.status(404).json({ ok: false, error: 'Certificate not found' });
+    }
+
+    // Remove the old file, write the new one.
+    try { fs.unlinkSync(row.file_path); } catch (e) { /* old file may already be gone, ignore */ }
+
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storedName = Date.now() + '-' + safeName;
+    const filePath = path.join(CERT_DIR, storedName);
+    fs.writeFileSync(filePath, Buffer.from(fileBase64, 'base64'));
+
+    db.prepare(`
+      UPDATE certificates SET filename = ?, file_path = ?, vehicle_reg = ?, uploaded_at = ? WHERE id = ?
+    `).run(
+      filename,
+      filePath,
+      vehicleReg !== undefined ? ((vehicleReg || '').trim() || null) : row.vehicle_reg,
+      new Date().toISOString(),
+      id
+    );
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Replace certificate failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not replace certificate' });
   }
 });
 
