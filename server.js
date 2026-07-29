@@ -527,7 +527,7 @@ app.post('/apply-broker', (req, res) => {
 
 // --- Route: POST /broker-application-pay ------------------------------------
 // body: { applicationId }
-// Marks the £999 deposit as paid (simulated — no real payment gateway is
+// Marks the £499.48 deposit as paid (simulated — no real payment gateway is
 // connected) and sends the professional confirmation email.
 app.post('/broker-application-pay', async (req, res) => {
   try {
@@ -828,7 +828,7 @@ function buildBrokerApplicationEmailHtml({ fullName }) {
               <td style="padding:36px 36px 8px;">
                 <h1 style="margin:0 0 6px;font-size:22px;color:#22192B;">Thanks for applying, ${greetingName}!</h1>
                 <p style="margin:0 0 20px;font-size:15px;color:#6B6478;line-height:1.6;">
-                  We've received your broker application and your <strong>£999 refundable deposit</strong>.
+                  We've received your broker application and your <strong>£499.48 refundable deposit</strong>.
                   This deposit is fully refundable after 12 months, as long as your broker account remains in
                   good standing.
                 </p>
