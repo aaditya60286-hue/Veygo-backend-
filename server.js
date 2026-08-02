@@ -518,6 +518,22 @@ app.post('/apply-broker', (req, res) => {
       experience: (experience || '').trim() || null,
     });
 
+    // Fire-and-forget: never let email issues delay or break the application response.
+    sendEmailViaBrevo({
+      toEmail: email.trim(),
+      toName: fullName.trim(),
+      subject: 'We\'ve Received Your Car Insur Broker Application',
+      html: buildBrokerApplicationReceivedEmailHtml({ fullName: fullName.trim() }),
+    }).catch(err => console.error('Failed to send broker application received email:', err));
+
+    notifyAdmin({
+      event: 'New broker application submitted',
+      name: fullName.trim(),
+      email: email.trim(),
+      phone: mobile,
+      details: `Address: ${address || '—'}, ${postcode || ''}. Experience: ${experience || '—'}`,
+    });
+
     res.json({ ok: true, applicationId: info.lastInsertRowid });
   } catch (err) {
     console.error('Broker application failed:', err);
@@ -778,6 +794,87 @@ function buildCancellationEmailHtml({ customerName, reason }) {
                 <p style="margin:0 0 16px;font-size:13px;color:#9A93A6;line-height:1.6;">
                   For your security, this account can no longer be logged into. If you didn't request this
                   cancellation, please contact us immediately.
+                </p>
+                <hr style="border:none;border-top:1px solid #EFEAF6;margin:0 0 16px;">
+                <p style="margin:0;font-size:12px;color:#B3ADBE;line-height:1.6;">
+                  Car Insur is a trading name of Atlanta Insurance Intermediaries Limited. Authorised and Regulated
+                  by the Financial Conduct Authority. Registered address: Embankment West Tower, 101 Cathedral
+                  Approach, Salford, M3 7FB.
+                </p>
+              </td>
+            </tr>
+
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+  </html>
+  `;
+}
+
+// Professional "we've received your application" email, sent immediately
+// when someone submits the broker application form — before the deposit
+// step. Distinct from buildBrokerApplicationEmailHtml, which confirms the
+// deposit itself once that's completed.
+function buildBrokerApplicationReceivedEmailHtml({ fullName }) {
+  const greetingName = fullName ? fullName.split(' ')[0] : 'there';
+
+  return `
+  <!DOCTYPE html>
+  <html>
+  <body style="margin:0;padding:0;background:#F1EEF7;font-family:'Segoe UI',Arial,sans-serif;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F1EEF7;padding:32px 0;">
+      <tr>
+        <td align="center">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#FFFFFF;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(91,42,134,0.08);">
+
+            <!-- Header banner -->
+            <tr>
+              <td style="background:linear-gradient(135deg,#5B2A86,#3E1B5E);padding:32px 36px;text-align:left;">
+                <span style="font-size:24px;font-weight:800;color:#ffffff;letter-spacing:-0.5px;">
+                  Car <span style="color:#00C2B2;">Insur</span>
+                </span>
+                <div style="font-size:11px;letter-spacing:1.5px;color:rgba(255,255,255,0.75);margin-top:4px;text-transform:uppercase;">
+                  Broker Programme
+                </div>
+              </td>
+            </tr>
+
+            <!-- Body -->
+            <tr>
+              <td style="padding:36px 36px 8px;">
+                <h1 style="margin:0 0 6px;font-size:22px;color:#22192B;">Thanks for applying, ${greetingName}!</h1>
+                <p style="margin:0 0 20px;font-size:15px;color:#6B6478;line-height:1.6;">
+                  We've received your broker application. The next step is a <strong>£499.48 refundable deposit</strong>
+                  to activate your broker account — this is fully refundable after 12 months, as long as your
+                  account remains in good standing.
+                </p>
+              </td>
+            </tr>
+
+            <!-- Next steps callout -->
+            <tr>
+              <td style="padding:8px 36px 4px;">
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="background:#EAFBF7;border:1px solid #C9F0E6;border-radius:12px;padding:18px 20px;">
+                      <p style="margin:0;font-size:14.5px;color:#0B5F52;line-height:1.6;">
+                        <strong>What happens next:</strong> one of our team members will contact you within
+                        <strong>10 minutes</strong> to help you complete your deposit payment and finish your
+                        onboarding.
+                      </p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+
+            <!-- Footer -->
+            <tr>
+              <td style="padding:28px 36px 32px;">
+                <p style="margin:0 0 16px;font-size:13px;color:#9A93A6;line-height:1.6;">
+                  If you didn't submit this application, please contact us straight away.
                 </p>
                 <hr style="border:none;border-top:1px solid #EFEAF6;margin:0 0 16px;">
                 <p style="margin:0;font-size:12px;color:#B3ADBE;line-height:1.6;">
