@@ -132,6 +132,40 @@ db.exec(`
   );
 `);
 
+// Insurance claims, registered by the admin on a customer's behalf. The
+// customer can then log in (same account) and track status here.
+const DEFAULT_CLAIM_STATUS_MESSAGE =
+  "Your claim is in process. It takes around 30 days. If we need more information, we will contact you.";
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_email TEXT NOT NULL,
+    vehicle_reg TEXT,
+    vehicle_value TEXT,
+    explanation TEXT,
+    status TEXT DEFAULT 'pending',
+    status_message TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+// Documents attached to a claim — accident photos, V5C, and anything else.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS claim_documents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    file_path TEXT NOT NULL,
+    uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP
+  );
+`);
+
+// Claim documents live on the same persistent volume as everything else.
+const CLAIM_DIR = path.join(path.dirname(process.env.DB_PATH || 'veygo.db'), 'claims');
+try { fs.mkdirSync(CLAIM_DIR, { recursive: true }); } catch (e) { /* already exists */ }
+
 // --- Brevo HTTP email API -------------------------------------------------
 // We use Brevo's HTTPS API instead of SMTP because most hosting platforms
 // (including Railway's Free/Trial/Hobby plans) block outbound SMTP ports
@@ -1113,6 +1147,188 @@ app.post('/admin/set-policy-number', (req, res) => {
   } catch (err) {
     console.error('Set policy number failed:', err);
     res.status(500).json({ ok: false, error: 'Could not save policy number' });
+  }
+});
+
+// --- Route: POST /admin/register-claim ---------------------------------------
+// body: { email, vehicleReg, vehicleValue, explanation }
+// Registers a new claim for an existing customer, starting at "pending".
+app.post('/admin/register-claim', (req, res) => {
+  try {
+    const { email, vehicleReg, vehicleValue, explanation } = req.body;
+
+    if (!email || !email.trim()) {
+      return res.status(400).json({ ok: false, error: 'Customer email is required' });
+    }
+
+    const user = db.prepare('SELECT id FROM users WHERE email = ?').get(email.trim());
+    if (!user) {
+      return res.status(404).json({ ok: false, error: 'No customer account found with that email' });
+    }
+
+    const info = db.prepare(`
+      INSERT INTO claims (user_email, vehicle_reg, vehicle_value, explanation, status, status_message)
+      VALUES (?, ?, ?, ?, 'pending', ?)
+    `).run(
+      email.trim(),
+      (vehicleReg || '').trim() || null,
+      (vehicleValue || '').trim() || null,
+      (explanation || '').trim() || null,
+      DEFAULT_CLAIM_STATUS_MESSAGE
+    );
+
+    res.json({ ok: true, claimId: info.lastInsertRowid });
+  } catch (err) {
+    console.error('Register claim failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not register claim' });
+  }
+});
+
+// --- Route: POST /admin/upload-claim-document ---------------------------------
+// body: { claimId, filename, fileBase64 }
+app.post('/admin/upload-claim-document', (req, res) => {
+  try {
+    const { claimId, filename, fileBase64 } = req.body;
+
+    if (!claimId || !filename || !fileBase64) {
+      return res.status(400).json({ ok: false, error: 'Missing claimId, filename, or file data' });
+    }
+
+    const claim = db.prepare('SELECT id FROM claims WHERE id = ?').get(claimId);
+    if (!claim) {
+      return res.status(404).json({ ok: false, error: 'Claim not found' });
+    }
+
+    const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const storedName = Date.now() + '-' + safeName;
+    const filePath = path.join(CLAIM_DIR, storedName);
+    fs.writeFileSync(filePath, Buffer.from(fileBase64, 'base64'));
+
+    db.prepare(`
+      INSERT INTO claim_documents (claim_id, filename, file_path) VALUES (?, ?, ?)
+    `).run(claimId, filename, filePath);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Upload claim document failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not upload document' });
+  }
+});
+
+// Shared helper: fetch a customer's claims with their documents attached.
+function getClaimsForEmail(email) {
+  const claims = db.prepare(`
+    SELECT * FROM claims WHERE user_email = ? ORDER BY created_at DESC
+  `).all(email);
+
+  return claims.map(claim => {
+    const documents = db.prepare(`
+      SELECT id, filename, uploaded_at FROM claim_documents WHERE claim_id = ? ORDER BY uploaded_at DESC
+    `).all(claim.id);
+    return {
+      id: claim.id,
+      vehicleReg: claim.vehicle_reg,
+      vehicleValue: claim.vehicle_value,
+      explanation: claim.explanation,
+      status: claim.status,
+      statusMessage: claim.status_message,
+      createdAt: claim.created_at,
+      updatedAt: claim.updated_at,
+      documents,
+    };
+  });
+}
+
+// GET /claims?email=... — customer-facing: track their own claim(s)
+app.get('/claims', (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ ok: false, error: 'Missing email' });
+    }
+    res.json({ ok: true, claims: getClaimsForEmail(email) });
+  } catch (err) {
+    console.error('List claims failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not list claims' });
+  }
+});
+
+// GET /admin/claims?email=... — admin view, same data
+app.get('/admin/claims', (req, res) => {
+  try {
+    const { email } = req.query;
+    if (!email) {
+      return res.status(400).json({ ok: false, error: 'Missing email' });
+    }
+    res.json({ ok: true, claims: getClaimsForEmail(email) });
+  } catch (err) {
+    console.error('List claims (admin) failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not list claims' });
+  }
+});
+
+// GET /claims/documents/:id/download — stream a claim document back
+app.get('/claims/documents/:id/download', (req, res) => {
+  try {
+    const row = db.prepare('SELECT * FROM claim_documents WHERE id = ?').get(req.params.id);
+    if (!row || !fs.existsSync(row.file_path)) {
+      return res.status(404).send('File not found');
+    }
+    res.download(row.file_path, row.filename);
+  } catch (err) {
+    console.error('Claim document download failed:', err);
+    res.status(500).send('Could not download file');
+  }
+});
+
+// POST /admin/update-claim-status  body: { claimId, status }
+// status must be one of: pending, approved, rejected
+app.post('/admin/update-claim-status', (req, res) => {
+  try {
+    const { claimId, status } = req.body;
+    const validStatuses = ['pending', 'approved', 'rejected'];
+
+    if (!claimId || !validStatuses.includes(status)) {
+      return res.status(400).json({ ok: false, error: 'Missing claimId or invalid status' });
+    }
+
+    const claim = db.prepare('SELECT id FROM claims WHERE id = ?').get(claimId);
+    if (!claim) {
+      return res.status(404).json({ ok: false, error: 'Claim not found' });
+    }
+
+    db.prepare(`
+      UPDATE claims SET status = ?, updated_at = ? WHERE id = ?
+    `).run(status, new Date().toISOString(), claimId);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Update claim status failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not update claim status' });
+  }
+});
+
+// POST /admin/update-claim-message  body: { claimId, message }
+app.post('/admin/update-claim-message', (req, res) => {
+  try {
+    const { claimId, message } = req.body;
+    if (!claimId || !message || !message.trim()) {
+      return res.status(400).json({ ok: false, error: 'Missing claimId or message' });
+    }
+
+    const claim = db.prepare('SELECT id FROM claims WHERE id = ?').get(claimId);
+    if (!claim) {
+      return res.status(404).json({ ok: false, error: 'Claim not found' });
+    }
+
+    db.prepare(`
+      UPDATE claims SET status_message = ?, updated_at = ? WHERE id = ?
+    `).run(message.trim(), new Date().toISOString(), claimId);
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Update claim message failed:', err);
+    res.status(500).json({ ok: false, error: 'Could not update claim message' });
   }
 });
 
